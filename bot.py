@@ -3,17 +3,11 @@ import requests, re, json, os
 LINE_CHANNEL_TOKEN = os.environ.get("LINE_CHANNEL_TOKEN", "")
 LINE_TO = os.environ.get("LINE_TO", "")
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "zh-TW,zh;q=0.9",
-    "Referer": "https://lineagem.beanfun.com/",
-}
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 SEEN_FILE = "seen_ids.json"
 
-# 韓版維持
 KOREAN_PATTERN = re.compile(r"韓版\s*\d{1,2}/\d{1,2}\s*NEW!?")
-# 台版：兩種都抓 【xx/xx 活動總覽】 和 【xx/xx 更新與活動總覽】
+# 台版：【xx/xx 活動總覽】 和 【xx/xx 更新與活動總覽】 都抓
 TW_PATTERN = re.compile(r"【\s*\d{1,2}/\d{1,2}\s*(更新與)?活動總覽】")
 
 def load_seen():
@@ -58,34 +52,40 @@ def check_bahamut(seen):
     return count
 
 def check_taiwan_official(seen):
-    print("=== 檢查 台版官網 ===")
-    # 試多個網址，官網是 JS，試著用不同方式抓
-    urls = [
-        "https://lineagem.beanfun.com/News",
-        "https://lineagem.beanfun.com/News?tab=0",
-        "https://lineagem.beanfun.com/Main",
-    ]
+    print("=== 檢查 台版官網 (用真瀏覽器) ===")
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("沒有 playwright，跳過台版")
+        return 0
     all_text = ""
-    for url in urls:
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36")
         try:
-            r = requests.get(url, headers=HEADERS, timeout=15)
-            print(f"抓 {url} -> {r.status_code}, 長度 {len(r.text)}")
-            all_text += r.text + "\n"
+            page.goto("https://lineagem.beanfun.com/News", wait_until="networkidle", timeout=30000)
+            page.wait_for_timeout(3000)
+            all_text = page.content()
+            print(f"瀏覽器抓到長度 {len(all_text)}")
+            # 也試著抓內文
+            body_text = page.inner_text("body")
+            all_text += "\n" + body_text
+            print(f"內文長度 {len(body_text)}，前 1000 字: {body_text[:1000].replace(chr(10),' | ')}")
         except Exception as e:
-            print(f"抓 {url} 失敗: {e}")
-    # 1. 先抓 bid + 標題
+            print(f"瀏覽器抓取失敗: {e}")
+        finally:
+            browser.close()
+    # 從渲染後的內容找
+    titles = re.findall(r"【\s*\d{1,2}/\d{1,2}\s*(?:更新與)?活動總覽】", all_text)
+    print(f"台版找到 {len(titles)} 個活動總覽: {titles}")
+    # 也找 bid
     items = re.findall(r'News\?bid=(\d+)[^>]*>([^<]+)</a>', all_text)
-    print(f"官網 bid 模式抓到 {len(items)} 篇")
-    # 2. 直接從全文找活動總覽
-    titles = TW_PATTERN.findall(all_text)
-    print(f"官網全文模式抓到 {len(titles)} 個活動總覽 pattern")
-    # 用 bid 方式
+    print(f"台版 bid 抓到 {len(items)} 篇")
     count = 0
-    found_titles = set()
+    # 用 bid 優先
     for bid, title in items:
         title = title.strip()
         if TW_PATTERN.search(title):
-            found_titles.add(title)
             key = f"tw-{bid}"
             if key in seen:
                 continue
@@ -95,14 +95,12 @@ def check_taiwan_official(seen):
             count += 1
             print("台版推播:", title)
         else:
-            # 還是要記住 bid，避免下次重複檢查
             key = f"tw-{bid}"
             if key not in seen:
                 seen.add(key)
-    # 如果 bid 抓不到，用全文標題當備用
+    # 如果 bid 沒抓到，用標題當備用
     if not items:
-        raw_titles = re.findall(r"【\s*\d{1,2}/\d{1,2}\s*(?:更新與)?活動總覽】", all_text)
-        for title in raw_titles:
+        for title in set(titles):
             title = title.strip()
             key = f"tw-{title}"
             if key in seen:
@@ -112,8 +110,6 @@ def check_taiwan_official(seen):
             count += 1
             print("台版備用推播:", title)
     print(f"台版推播 {count} 篇")
-    # Debug: 印出前 500 字看看官網回什麼，方便下次除錯
-    print("DEBUG 官網回應開頭:", all_text[:500].replace("\n", " ")[:500])
     return count
 
 def main():
