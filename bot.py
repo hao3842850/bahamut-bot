@@ -3,13 +3,18 @@ import requests, re, json, os
 LINE_CHANNEL_TOKEN = os.environ.get("LINE_CHANNEL_TOKEN", "")
 LINE_TO = os.environ.get("LINE_TO", "")
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-TW,zh;q=0.9",
+    "Referer": "https://lineagem.beanfun.com/",
+}
 SEEN_FILE = "seen_ids.json"
 
-# 韓版維持：韓版 xx/xx NEW!
+# 韓版維持
 KOREAN_PATTERN = re.compile(r"韓版\s*\d{1,2}/\d{1,2}\s*NEW!?")
-# 台版官網：只抓 【xx/xx 活動總覽】
-TW_PATTERN = re.compile(r"【\s*\d{1,2}/\d{1,2}\s*活動總覽】")
+# 台版：兩種都抓 【xx/xx 活動總覽】 和 【xx/xx 更新與活動總覽】
+TW_PATTERN = re.compile(r"【\s*\d{1,2}/\d{1,2}\s*(更新與)?活動總覽】")
 
 def load_seen():
     if os.path.exists(SEEN_FILE):
@@ -54,36 +59,61 @@ def check_bahamut(seen):
 
 def check_taiwan_official(seen):
     print("=== 檢查 台版官網 ===")
-    url = "https://lineagem.beanfun.com/News"
-    r = requests.get(url, headers=HEADERS, timeout=15)
-    items = re.findall(r'News\?bid=(\d+)[^>]*>([^<]+)</a>', r.text)
+    # 試多個網址，官網是 JS，試著用不同方式抓
+    urls = [
+        "https://lineagem.beanfun.com/News",
+        "https://lineagem.beanfun.com/News?tab=0",
+        "https://lineagem.beanfun.com/Main",
+    ]
+    all_text = ""
+    for url in urls:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            print(f"抓 {url} -> {r.status_code}, 長度 {len(r.text)}")
+            all_text += r.text + "\n"
+        except Exception as e:
+            print(f"抓 {url} 失敗: {e}")
+    # 1. 先抓 bid + 標題
+    items = re.findall(r'News\?bid=(\d+)[^>]*>([^<]+)</a>', all_text)
+    print(f"官網 bid 模式抓到 {len(items)} 篇")
+    # 2. 直接從全文找活動總覽
+    titles = TW_PATTERN.findall(all_text)
+    print(f"官網全文模式抓到 {len(titles)} 個活動總覽 pattern")
+    # 用 bid 方式
+    count = 0
+    found_titles = set()
+    for bid, title in items:
+        title = title.strip()
+        if TW_PATTERN.search(title):
+            found_titles.add(title)
+            key = f"tw-{bid}"
+            if key in seen:
+                continue
+            seen.add(key)
+            link = f"https://lineagem.beanfun.com/News?bid={bid}"
+            push_line(f"台版官網\n{title}\n{link}")
+            count += 1
+            print("台版推播:", title)
+        else:
+            # 還是要記住 bid，避免下次重複檢查
+            key = f"tw-{bid}"
+            if key not in seen:
+                seen.add(key)
+    # 如果 bid 抓不到，用全文標題當備用
     if not items:
-        titles = re.findall(r"【\s*\d{1,2}/\d{1,2}\s*活動總覽】", r.text)
-        print(f"官網備用模式抓到 {len(titles)} 個活動總覽")
-        count = 0
-        for title in titles:
+        raw_titles = re.findall(r"【\s*\d{1,2}/\d{1,2}\s*(?:更新與)?活動總覽】", all_text)
+        for title in raw_titles:
             title = title.strip()
             key = f"tw-{title}"
             if key in seen:
                 continue
             seen.add(key)
-            push_line(f"台版官網\n{title}\n{url}")
+            push_line(f"台版官網\n{title}\nhttps://lineagem.beanfun.com/News")
             count += 1
-        return count
-    print(f"官網抓到 {len(items)} 篇")
-    count = 0
-    for bid, title in items:
-        title = title.strip()
-        key = f"tw-{bid}"
-        if key in seen:
-            continue
-        seen.add(key)
-        if TW_PATTERN.search(title):
-            link = f"https://lineagem.beanfun.com/News?bid={bid}"
-            push_line(f"台版官網\n{title}\n{link}")
-            count += 1
-            print("台版推播:", title)
+            print("台版備用推播:", title)
     print(f"台版推播 {count} 篇")
+    # Debug: 印出前 500 字看看官網回什麼，方便下次除錯
+    print("DEBUG 官網回應開頭:", all_text[:500].replace("\n", " ")[:500])
     return count
 
 def main():
