@@ -7,7 +7,6 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 SEEN_FILE = "seen_ids.json"
 
 KOREAN_PATTERN = re.compile(r"韓版\s*\d{1,2}/\d{1,2}\s*NEW!?")
-# 台版：【xx/xx 活動總覽】 和 【xx/xx 更新與活動總覽】 都抓
 TW_PATTERN = re.compile(r"【\s*\d{1,2}/\d{1,2}\s*(更新與)?活動總覽】")
 
 def load_seen():
@@ -52,63 +51,58 @@ def check_bahamut(seen):
     return count
 
 def check_taiwan_official(seen):
-    print("=== 檢查 台版官網 (用真瀏覽器) ===")
+    print("=== 檢查 台版官網 (用真瀏覽器 + 抓連結) ===")
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print("沒有 playwright，跳過台版")
+        print("沒有 playwright")
         return 0
-    all_text = ""
+    links = []
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36")
         try:
             page.goto("https://lineagem.beanfun.com/News", wait_until="networkidle", timeout=30000)
             page.wait_for_timeout(3000)
-            all_text = page.content()
-            print(f"瀏覽器抓到長度 {len(all_text)}")
-            # 也試著抓內文
-            body_text = page.inner_text("body")
-            all_text += "\n" + body_text
-            print(f"內文長度 {len(body_text)}，前 1000 字: {body_text[:1000].replace(chr(10),' | ')}")
+            # 直接拿所有 <a> 的文字 + 連結，這樣才拿得到正確的文章連結
+            links = page.evaluate("""() => {
+                return Array.from(document.querySelectorAll('a')).map(a => ({
+                    text: (a.innerText || '').trim(),
+                    href: a.href
+                })).filter(x => x.text.length > 0);
+            }""")
+            print(f"瀏覽器抓到 {len(links)} 個連結")
+            for l in links[:20]:
+                print(f"連結: {l['text'][:40]} -> {l['href']}")
         except Exception as e:
-            print(f"瀏覽器抓取失敗: {e}")
+            print(f"瀏覽器失敗: {e}")
         finally:
             browser.close()
-    # 從渲染後的內容找
-    titles = re.findall(r"【\s*\d{1,2}/\d{1,2}\s*(?:更新與)?活動總覽】", all_text)
-    print(f"台版找到 {len(titles)} 個活動總覽: {titles}")
-    # 也找 bid
-    items = re.findall(r'News\?bid=(\d+)[^>]*>([^<]+)</a>', all_text)
-    print(f"台版 bid 抓到 {len(items)} 篇")
     count = 0
-    # 用 bid 優先
-    for bid, title in items:
-        title = title.strip()
-        if TW_PATTERN.search(title):
-            key = f"tw-{bid}"
-            if key in seen:
-                continue
-            seen.add(key)
-            link = f"https://lineagem.beanfun.com/News?bid={bid}"
-            push_line(f"台版官網\n{title}\n{link}")
-            count += 1
-            print("台版推播:", title)
+    for item in links:
+        title = item["text"]
+        href = item["href"]
+        if not TW_PATTERN.search(title):
+            continue
+        # 用連結當 key，才不會重複推同一個連結
+        # href 可能是 https://lineagem.beanfun.com/News?bid=xxxx 或 /News/xxxx
+        key = f"tw-{href}"
+        # 也兼容舊的 title key
+        key2 = f"tw-{title}"
+        if key in seen or key2 in seen:
+            print(f"已推過，跳過: {title}")
+            continue
+        seen.add(key)
+        seen.add(key2)
+        # 如果 href 還是首頁 /News，就不要用首頁，改用 News 列表頁 + 標題提示
+        if href.rstrip("/").endswith("/News") or href.rstrip("/").endswith("/News?tab=0"):
+            print(f"警告：{title} 的連結還是首頁，改用列表頁")
+            link = "https://lineagem.beanfun.com/News"
         else:
-            key = f"tw-{bid}"
-            if key not in seen:
-                seen.add(key)
-    # 如果 bid 沒抓到，用標題當備用
-    if not items:
-        for title in set(titles):
-            title = title.strip()
-            key = f"tw-{title}"
-            if key in seen:
-                continue
-            seen.add(key)
-            push_line(f"台版官網\n{title}\nhttps://lineagem.beanfun.com/News")
-            count += 1
-            print("台版備用推播:", title)
+            link = href
+        push_line(f"台版官網\n{title}\n{link}")
+        count += 1
+        print("台版推播:", title, "->", link)
     print(f"台版推播 {count} 篇")
     return count
 
